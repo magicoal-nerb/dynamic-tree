@@ -1,8 +1,10 @@
+--!native
 --!strict
 
 local Bvh = {}
 Bvh.__index = Bvh
 
+const kFatAABB = Vector3.one
 const kStackSize = 32
 
 export type BvhNode<T> = {
@@ -13,8 +15,8 @@ export type BvhNode<T> = {
 	parent: number,
 	height: number,
 
-	min: vector,
-	max: vector,
+	min: Vector3,
+	max: Vector3,
 }
 
 export type Bvh<T> = setmetatable<{
@@ -23,27 +25,36 @@ export type Bvh<T> = setmetatable<{
 	root: number,
 }, typeof(Bvh)>
 
-local function sah(min: vector, max: vector): number
+local function engulfed(min0: Vector3, max0: Vector3, min1: Vector3, max1: Vector3): boolean
+	return min1.X <= min0.X and min1.Y <= min0.Y and min1.Z <= min0.Z 
+		and max0.X <= max1.X and max0.Y <= max1.Y and max0.Z <= max1.Z
+end
+
+local function sah(min: Vector3, max: Vector3): number
 	local delta = max - min
-	return delta.x * delta.y + delta.y * delta.z + delta.x * delta.z
+	return delta.X * delta.Y + delta.Y * delta.Z + delta.X * delta.Z
 end
 
-local function collides(min0: vector, max0: vector, min1: vector, max1: vector): boolean
-	return min0.x <= max1.x and max0.x >= min1.x
-		and min0.y <= max1.y and max0.y >= min1.y
-		and min0.z <= max1.z and max0.z >= min1.z
+local function union<T>(a: BvhNode<T>, b: BvhNode<T>): (Vector3, Vector3)
+	return Vector3.min(a.min, b.min), Vector3.max(a.max, b.max)
 end
 
-local function rayhit(min: vector, max: vector, origin: vector, direction: vector): boolean
+local function collides(min0: Vector3, max0: Vector3, min1: Vector3, max1: Vector3): boolean
+	return min0.X <= max1.X and max0.X >= min1.X
+		and min0.Y <= max1.Y and max0.Y >= min1.Y
+		and min0.Z <= max1.Z and max0.Z >= min1.Z
+end
+
+local function rayhit(min: Vector3, max: Vector3, origin: Vector3, direction: Vector3): boolean
 	if collides(min, max, origin, origin) then
 		return true
 	end
 
-	local invDirection = vector.one / direction
+	local invDirection = Vector3.one / direction
 	
 	local vMax, vMin = (max - origin) * invDirection, (min - origin) * invDirection
-	local rMax, rMin = vector.max(vMax, vMin), vector.min(vMax, vMin)
-	local tMin, tMax = math.max(rMin.x, rMin.y, rMin.z), math.min(rMax.x, rMax.y, rMax.z)
+	local rMax, rMin = Vector3.max(vMax, vMin), Vector3.min(vMax, vMin)
+	local tMin, tMax = math.max(rMin.X, rMin.Y, rMin.Z), math.min(rMax.X, rMax.Y, rMax.Z)
 
 	return 0.0 <= math.min(tMax, tMin) and tMin <= 1.0 and tMin <= tMax
 end
@@ -65,8 +76,8 @@ function Bvh.allocateNode<T>(self: Bvh<T>): number
 		right = 0,
 		parent = 0,
 		height = 0,
-		min = vector.create(0, 0),
-		max = vector.create(0, 0),
+		min = Vector3.zero,
+		max = Vector3.zero,
 	} :: BvhNode<T>
 
 	return id
@@ -83,7 +94,7 @@ function Bvh.findBestSibling<T>(self: Bvh<T>, box: BvhNode<T>)
 	local rootNode = nodes[self.root]
 
 	local baseArea = sah(rootNode.min, rootNode.max)
-	local directCost = sah(vector.min(rootNode.min, box.min), vector.max(rootNode.max, box.max))
+	local directCost = sah(Vector3.min(rootNode.min, box.min), Vector3.max(rootNode.max, box.max))
 	local inheritedCost = 0.0
 
 	local bestSibling = self.root
@@ -108,8 +119,7 @@ function Bvh.findBestSibling<T>(self: Bvh<T>, box: BvhNode<T>)
 		
 		local leftLowerCost, rightLowerCost = math.huge, math.huge
 		local leftArea, rightArea = 0, 0
-		local leftDirectCost, rightDirectCost = sah(vector.min(left.min, box.min), vector.max(right.max, box.max)),
-			sah(vector.min(right.min, box.min), vector.max(right.max, box.max))
+		local leftDirectCost, rightDirectCost = sah(union(left, box)), sah(union(right, box))
 
 		if leftLeaf then
 			-- Left is a leaf node
@@ -172,8 +182,8 @@ function Bvh.rotateNode<T>(self: Bvh<T>, iA: number)
 		local F, G = nodes[iF], nodes[iG]
 		local costBase = sah(C.min, C.max)
 
-		local costBF = sah(vector.min(B.min, F.min), vector.max(B.max, F.max))
-		local costBG = sah(vector.min(B.min, G.min), vector.max(B.max, G.max))
+		local costBF = sah(union(B, F))
+		local costBG = sah(union(B, G))
 
 		if costBase < costBF and costBase < costBG then
 			-- Rotation doesn't improve cost
@@ -182,13 +192,13 @@ function Bvh.rotateNode<T>(self: Bvh<T>, iA: number)
 			-- Swap BF
 			A.left, C.left = iF, iB
 			B.parent, F.parent = iC, iA
-			C.min, C.max = vector.min(B.min, G.min), vector.max(B.max, G.max)
+			C.min, C.max = union(B, G)
 			C.height, A.height = 1 + math.max(B.height, G.height), 1 + math.max(C.height, F.height)
 		else
 			-- Swap BG
 			A.left, C.right = iG, iB
 			B.parent, G.parent = iC, iA
-			C.min, C.max = vector.min(B.min, F.min), vector.max(B.max, F.max)
+			C.min, C.max = union(B, F)
 			C.height, A.height = 1 + math.max(B.height, F.height), 1 + math.max(C.height, G.height)
 		end
 	elseif C.height == 0 then
@@ -198,8 +208,8 @@ function Bvh.rotateNode<T>(self: Bvh<T>, iA: number)
 
 		local costBase = sah(B.min, B.max)
 
-		local costCD = sah(vector.min(C.min, E.min), vector.max(C.max, E.max))
-		local costCE = sah(vector.min(C.min, D.min), vector.max(C.max, D.max))
+		local costCD = sah(union(C, E))
+		local costCE = sah(union(C, D))
 
 		if costBase < costCD and costBase < costCE then
 			-- Rotation doens't improve cost
@@ -208,13 +218,13 @@ function Bvh.rotateNode<T>(self: Bvh<T>, iA: number)
 			-- Swap C and D
 			A.right, B.left = iD, iC
 			C.parent,  D.parent = iB, iA
-			B.min, B.max = vector.min(C.min, E.min), vector.max(C.max, E.max)
+			B.min, B.max = union(C, E)
 			B.height, A.height = 1 + math.max(C.height, E.height), 1 + math.max(B.height, D.height)
 		else
 			-- Swap C and E
 			A.right, B.right = iE, iC
 			C.parent, E.parent = iB, iA
-			B.min, B.max = vector.min(C.min, D.min), vector.max(C.max, D.max)
+			B.min, B.max = union(C, D)
 			B.height, A.height = 1 + math.max(C.height, D.height), 1 + math.max(B.height, E.height)
 		end
 	else
@@ -230,10 +240,10 @@ function Bvh.rotateNode<T>(self: Bvh<T>, iA: number)
 		local bestCost = costBase
 
 		-- Cost of swapping B and F
-		local costBF = areaB + sah(vector.min(B.min, G.min), vector.max(B.max, G.max))
-		local costBG = areaB + sah(vector.min(B.min, F.min), vector.max(B.max, F.max))
-		local costCD = areaB + sah(vector.min(C.min, E.min), vector.max(C.max, E.max))
-		local costCE = areaB + sah(vector.min(C.min, D.min), vector.max(C.max, D.max))
+		local costBF = areaB + sah(union(B, G))
+		local costBG = areaB + sah(union(B, F))
+		local costCD = areaB + sah(union(C, E))
+		local costCE = areaB + sah(union(C, D))
 
 		if costBF < bestCost then
 			bestRotation = 1
@@ -261,31 +271,34 @@ function Bvh.rotateNode<T>(self: Bvh<T>, iA: number)
 			-- BF rotation
 			A.left, C.left = iF, iB
 			B.parent, F.parent = iC, iA
-			C.min, C.max = vector.min(B.min, G.min), vector.max(B.max, G.max)
+			C.min, C.max = union(B, G)
 			C.height, A.height = 1 + math.max(B.height, G.height), 1 + math.max(C.height, F.height)
 		elseif bestRotation == 2 then
 			-- BG rotation
 			A.left, C.right = iG, iB
 			B.parent, G.parent = iC, iA
-			C.min, C.max = vector.min(B.min, F.min), vector.max(B.max, F.max)
+			C.min, C.max = union(B, F)
 			C.height, A.height = 1 + math.max(B.height, F.height), 1 + math.max(C.height, G.height)
 		elseif bestRotation == 3 then
 			-- CD rotation
 			A.right, B.left = iD, iC
 			C.parent, D.parent = iB, iA
-			B.min, B.max = vector.min(C.min, E.min), vector.max(C.max, E.max)
+			B.min, B.max = union(C, E)
 			B.height, A.height = 1 + math.max(C.height, E.height), 1 + math.max(B.height, D.height)
 		elseif bestRotation == 4 then
 			-- BG rotation
 			A.right, B.left = iE, iC
 			C.parent, E.parent = iB, iA
-			B.min, B.max = vector.min(C.min, D.min), vector.max(C.max, D.max)
+			B.min, B.max = union(C, D)
 			B.height, A.height = 1 + math.max(C.height, D.height), 1 + math.max(B.height, E.height)
 		end
 	end
 end
 
-function Bvh.insert<T>(self: Bvh<T>, userdata: T, min: vector, max: vector)
+function Bvh.insert<T>(self: Bvh<T>, userdata: T, min: Vector3, max: Vector3): number
+	min -= kFatAABB
+	max += kFatAABB
+	
 	local nodes = self.nodes
 	local leaf = self:allocateNode()
 	nodes[leaf].userdata = userdata
@@ -295,7 +308,7 @@ function Bvh.insert<T>(self: Bvh<T>, userdata: T, min: vector, max: vector)
 	if self.root == 0 then
 		-- Root node
 		self.root = leaf
-		return
+		return leaf
 	end
 
 	-- Find the best sibling for this node
@@ -307,7 +320,7 @@ function Bvh.insert<T>(self: Bvh<T>, userdata: T, min: vector, max: vector)
 
 	local siblingNode = nodes[sibling]
 	local parentNode = nodes[newParent]
-	parentNode.min, parentNode.max = vector.min(leafNode.min, siblingNode.min), vector.max(leafNode.max, siblingNode.max)
+	parentNode.min, parentNode.max = union(leafNode, siblingNode)
 	parentNode.parent = oldParent
 	parentNode.height = siblingNode.height + 1
 
@@ -340,13 +353,14 @@ function Bvh.insert<T>(self: Bvh<T>, userdata: T, min: vector, max: vector)
 		local left = nodes[node.left]
 		local right = nodes[node.right]
 
-		node.min = vector.min(left.min, right.min)
-		node.max = vector.max(left.max, right.max)
+		node.min, node.max = union(left, right)
 		node.height = 1 + math.max(left.height, right.height)
 
 		self:rotateNode(index)
 		index = nodes[index].parent
 	end
+	
+	return leaf
 end
 
 function Bvh.delete<T>(self: Bvh<T>, leaf: number)
@@ -365,9 +379,9 @@ function Bvh.delete<T>(self: Bvh<T>, leaf: number)
 	if grandParent ~= 0 then
 		-- Destroy parent and connect sibling to grandparent
 		if nodes[grandParent].left == parent then
-			nodes[parent].left = sibling
+			nodes[grandParent].left = sibling
 		else
-			nodes[parent].right = sibling
+			nodes[grandParent].right = sibling
 		end
 
 		nodes[sibling].parent = grandParent
@@ -380,7 +394,7 @@ function Bvh.delete<T>(self: Bvh<T>, leaf: number)
 			local left = nodes[node.left]
 			local right = nodes[node.right]
 			
-			node.min, node.max = vector.min(left.min, right.min), vector.max(left.max, right.max)
+			node.min, node.max = union(left, right)
 			node.height = 1 + math.max(left.height, right.height)
 			index = node.parent
 		end
@@ -396,7 +410,7 @@ function Bvh.getUserdata<T>(self: Bvh<T>, id: number): T
 	return self.nodes[id].userdata
 end
 
-function Bvh.raycast<T>(self: Bvh<T>, origin: vector, direction: vector): { number }
+function Bvh.raycast<T>(self: Bvh<T>, origin: Vector3, direction: Vector3): { number }
 	local nodes = self.nodes
 	local output = {}
 
@@ -422,13 +436,13 @@ function Bvh.raycast<T>(self: Bvh<T>, origin: vector, direction: vector): { numb
 	return output
 end
 
-function Bvh.query<T>(self: Bvh<T>, min: vector, max: vector): { number }
+function Bvh.query<T>(self: Bvh<T>, min: Vector3, max: Vector3): { number }
 	local nodes = self.nodes
 	local output = {}
 
 	local stack = table.create(kStackSize, self.root)
 	local cursor = 1
-	
+
 	while cursor ~= 0 do
 		local iA = assert(table.remove(stack), "Luau")
 		local A = nodes[iA]
@@ -444,8 +458,24 @@ function Bvh.query<T>(self: Bvh<T>, min: vector, max: vector): { number }
 			end
 		end
 	end
-
+	
 	return output
+end
+
+function Bvh.update<T>(self: Bvh<T>, id: number, min0: Vector3, max0: Vector3)
+	local node = self.nodes[id]
+	
+	local min1 = node.min
+	local max1 = node.max
+
+	if engulfed(min0 - kFatAABB, max0 + kFatAABB, min1, max1) then
+		-- No need to update because the fat aabb still persists
+		return
+	end
+	
+	-- Reinsert because it is outside of the aabb range
+	self:delete(id)
+	self:insert(node.userdata, min0, max0)
 end
 
 return Bvh
