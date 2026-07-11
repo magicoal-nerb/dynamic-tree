@@ -1,11 +1,10 @@
---!native
 --!strict
 
 local Bvh = {}
 Bvh.__index = Bvh
 
 const kFatAABB = Vector3.one
-const kStackSize = 32
+const kStackSize = 8
 
 export type BvhNode<T> = {
 	userdata: T,
@@ -71,7 +70,6 @@ end
 function Bvh.allocateNode<T>(self: Bvh<T>): number
 	local id = table.remove(self.freelist) or #self.nodes + 1
 	self.nodes[id] = {
-		value = 0,
 		left = 0,
 		right = 0,
 		parent = 0,
@@ -81,10 +79,6 @@ function Bvh.allocateNode<T>(self: Bvh<T>): number
 	} :: BvhNode<T>
 
 	return id
-end
-
-function Bvh.freeNode<T>(self: Bvh<T>, node: number)
-	table.insert(self.freelist, node)
 end
 
 function Bvh.findBestSibling<T>(self: Bvh<T>, box: BvhNode<T>)
@@ -182,8 +176,8 @@ function Bvh.rotateNode<T>(self: Bvh<T>, iA: number)
 		local F, G = nodes[iF], nodes[iG]
 		local costBase = sah(C.min, C.max)
 
-		local costBF = sah(union(B, F))
-		local costBG = sah(union(B, G))
+		local costBF = sah(union(B, G))
+		local costBG = sah(union(B, F))
 
 		if costBase < costBF and costBase < costBG then
 			-- Rotation doesn't improve cost
@@ -242,8 +236,8 @@ function Bvh.rotateNode<T>(self: Bvh<T>, iA: number)
 		-- Cost of swapping B and F
 		local costBF = areaB + sah(union(B, G))
 		local costBG = areaB + sah(union(B, F))
-		local costCD = areaB + sah(union(C, E))
-		local costCE = areaB + sah(union(C, D))
+		local costCD = areaC + sah(union(C, E))
+		local costCE = areaC + sah(union(C, D))
 
 		if costBF < bestCost then
 			bestRotation = 1
@@ -262,7 +256,6 @@ function Bvh.rotateNode<T>(self: Bvh<T>, iA: number)
 		
 		if costCE < bestCost then
 			bestRotation = 4
-			bestCost = costCE
 		end
 
 		if bestRotation == 0 then
@@ -286,8 +279,8 @@ function Bvh.rotateNode<T>(self: Bvh<T>, iA: number)
 			B.min, B.max = union(C, E)
 			B.height, A.height = 1 + math.max(C.height, E.height), 1 + math.max(B.height, D.height)
 		elseif bestRotation == 4 then
-			-- BG rotation
-			A.right, B.left = iE, iC
+			-- CE rotation
+			A.right, B.right = iE, iC
 			C.parent, E.parent = iB, iA
 			B.min, B.max = union(C, D)
 			B.height, A.height = 1 + math.max(C.height, D.height), 1 + math.max(B.height, E.height)
@@ -385,7 +378,8 @@ function Bvh.delete<T>(self: Bvh<T>, leaf: number)
 		end
 
 		nodes[sibling].parent = grandParent
-		self:freeNode(leaf)
+		table.insert(self.freelist, parent)
+		table.insert(self.freelist, leaf)
 
 		-- Adjust ancestor bounds
 		local index = grandParent
@@ -402,7 +396,8 @@ function Bvh.delete<T>(self: Bvh<T>, leaf: number)
 		-- Then just set the root to the sibling
 		self.root = sibling
 		self.nodes[sibling].parent = 0
-		self:freeNode(leaf)
+		table.insert(self.freelist, parent)
+		table.insert(self.freelist, leaf)
 	end
 end
 
@@ -414,11 +409,12 @@ function Bvh.raycast<T>(self: Bvh<T>, origin: Vector3, direction: Vector3): { nu
 	local nodes = self.nodes
 	local output = {}
 
-	local stack = table.create(kStackSize, self.root)
+	local stack = table.create(kStackSize) :: { number }
 	local cursor = 1
-
+	stack[1] = self.root
+	
 	while cursor ~= 0 do
-		local iA = assert(table.remove(stack), "Luau")
+		local iA = stack[cursor]
 		local A = nodes[iA]
 		cursor -= 1
 
@@ -432,7 +428,7 @@ function Bvh.raycast<T>(self: Bvh<T>, origin: Vector3, direction: Vector3): { nu
 			end
 		end
 	end
-
+	
 	return output
 end
 
@@ -440,11 +436,12 @@ function Bvh.query<T>(self: Bvh<T>, min: Vector3, max: Vector3): { number }
 	local nodes = self.nodes
 	local output = {}
 
-	local stack = table.create(kStackSize, self.root)
+	local stack = table.create(kStackSize) :: { number }
 	local cursor = 1
-
+	stack[1] = self.root
+	
 	while cursor ~= 0 do
-		local iA = assert(table.remove(stack), "Luau")
+		local iA = stack[cursor]
 		local A = nodes[iA]
 		cursor -= 1
 
@@ -475,7 +472,7 @@ function Bvh.update<T>(self: Bvh<T>, id: number, min0: Vector3, max0: Vector3)
 	
 	-- Reinsert because it is outside of the aabb range
 	self:delete(id)
-	self:insert(node.userdata, min0, max0)
+	assert(id == self:insert(node.userdata, min0, max0))
 end
 
 return Bvh
