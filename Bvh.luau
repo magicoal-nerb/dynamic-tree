@@ -24,6 +24,15 @@ export type Bvh<T> = setmetatable<{
 	root: number,
 }, typeof(Bvh)>
 
+local function matrixabs(a: CFrame): CFrame
+	return CFrame.fromMatrix(
+		a.Position,
+		a.XVector:Abs(),
+		a.YVector:Abs(),
+		a.ZVector:Abs()
+	)
+end
+
 local function engulfed(min0: Vector3, max0: Vector3, min1: Vector3, max1: Vector3): boolean
 	return min1.X <= min0.X and min1.Y <= min0.Y and min1.Z <= min0.Z 
 		and max0.X <= max1.X and max0.Y <= max1.Y and max0.Z <= max1.Z
@@ -432,6 +441,82 @@ function Bvh.raycast<T>(self: Bvh<T>, origin: Vector3, direction: Vector3): { nu
 	return output
 end
 
+function Bvh.queryBvh<T>(
+	a: Bvh<T>, b: Bvh<T>,
+	rawA: CFrame, rawB: CFrame
+): { Vector2int16 }
+	-- Assumes that each extent of A, and B follow: matrixabs(raw:Inverse()) * point
+	local delta = matrixabs(rawA:ToObjectSpace(rawB))
+	local nodesA, nodesB = a.nodes, b.nodes
+	local rootA, rootB = nodesA[a.root], nodesB[b.root]
+	local output = {}
+
+	if not collides(
+		rootA.min, rootA.max,
+		delta * rootB.min, delta * rootB.max
+	) then
+		-- No collision
+		return {}
+	end
+	
+	local stack = table.create(rootA.height + rootB.height, 0) :: { number }
+	stack[1] = bit32.lshift(a.root, 16) + b.root
+	
+	local cursor = 1
+	while cursor ~= 0 do
+		local element = stack[cursor]
+		cursor -= 1
+		
+		local iA, iB = bit32.rshift(element, 16), bit32.band(element, 0xFFFF)
+		local branchA, branchB = nodesA[iA], nodesB[iB]
+		if branchA.userdata and branchB.userdata then
+			-- Both are leaves, so we can check contacts
+			if collides(
+				branchA.min,
+				branchA.max,
+				delta * branchB.min,
+				delta * branchB.max
+			) then
+				table.insert(output, Vector2int16.new(iA, iB))
+			end
+		elseif branchA.userdata then
+			-- A is a leaf
+			local min, max = branchA.min, branchA.max
+			
+			local right = nodesB[branchB.right]
+			local left = nodesB[branchB.left]
+			
+			if collides(min, max, delta * left.min, delta * left.max) then
+				cursor += 1
+				stack[cursor] = bit32.lshift(iA, 16) + branchB.left
+			end
+
+			if collides(min, max, delta * right.min, delta * right.max) then
+				cursor += 1
+				stack[cursor] = bit32.lshift(iA, 16) + branchB.right
+			end
+		else
+			-- B is a leaf or a branch
+			local min, max = delta * branchB.min, delta * branchB.max
+
+			local right = nodesA[branchA.right]
+			local left = nodesA[branchA.left]
+
+			if collides(min, max, left.min, left.max) then
+				cursor += 1
+				stack[cursor] = bit32.lshift(branchA.left, 16) + iB
+			end
+
+			if collides(min, max, right.min, right.max) then
+				cursor += 1
+				stack[cursor] = bit32.lshift(branchA.right, 16) + iB
+			end
+		end
+	end
+	
+	return output
+end
+
 function Bvh.query<T>(self: Bvh<T>, min: Vector3, max: Vector3): { number }
 	local nodes = self.nodes
 	local output = {}
@@ -461,6 +546,7 @@ end
 
 function Bvh.update<T>(self: Bvh<T>, id: number, min0: Vector3, max0: Vector3)
 	local node = self.nodes[id]
+	assert(node, `bvh::update(): ??? id={id} `)
 	
 	local min1 = node.min
 	local max1 = node.max
